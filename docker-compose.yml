@@ -1,0 +1,98 @@
+name: payment-test
+
+# restart: unless-stopped -> containers come back automatically after a crash or when
+# Docker Desktop restarts, but stay stopped if you stopped them yourself.
+# Host ports avoid the ones your other projects use (3000, 5173, 5432, 8000).
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: payment-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: payment-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: 4000
+      APP_URL: ${APP_URL:-http://localhost:5180}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      OMISE_SECRET_KEY: ${OMISE_SECRET_KEY:-}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_ENV: ${PAYPAL_ENV:-sandbox}
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: payment-frontend
+    restart: unless-stopped
+    environment:
+      API_TARGET: http://backend:4000
+      VITE_POLLING: "true"
+    ports:
+      - "5180:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+  # Forwards Stripe events (renewals, cancellations, payments) to the backend in local dev.
+  # Idles until STRIPE_SECRET_KEY is set in .env.
+  stripe-cli:
+    image: stripe/stripe-cli:latest
+    container_name: payment-stripe-cli
+    restart: unless-stopped
+    environment:
+      STRIPE_API_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_CLI_TELEMETRY_OPTOUT: "1"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$STRIPE_API_KEY" ]; then echo "STRIPE_SECRET_KEY not set - webhook forwarding is off"; exec sleep infinity; fi
+        exec stripe listen --forward-to http://backend:4000/api/stripe/webhook --events checkout.session.completed,checkout.session.async_payment_succeeded,invoice.paid,customer.subscription.created,customer.subscription.updated,customer.subscription.deleted
+    depends_on:
+      - backend
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: payment-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin:/var/lib/pgadmin
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
+  pgadmin:
